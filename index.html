@@ -13947,6 +13947,16 @@ async function boot(){
     // start portrait (only the collector uses landscape)
     try{ const so=Capacitor.Plugins.ScreenOrientation; if(so) await so.lock({ orientation:'portrait' }); }catch(e){}
   } else if('serviceWorker' in navigator){
+    // A new version took over a page that was already running an older one: in the first
+    // seconds nothing can be lost, so just reload; later, only say so.
+    const hadWorker=!!navigator.serviceWorker.controller;
+    let swSwapped=false;
+    navigator.serviceWorker.addEventListener('controllerchange',()=>{
+      if(!hadWorker || swSwapped) return;
+      swSwapped=true;
+      if(performance.now()<15000) location.reload();
+      else toast('A new version of Site Capture is ready. Close and reopen it to use it.');
+    });
     try{ await navigator.serviceWorker.register('sw.js'); }catch(e){}
   }
 }
