@@ -990,6 +990,27 @@
   #webhint .wh-d{color:var(--muted)}
   #webhint .wh-d b{color:var(--text);font-weight:600}
   #webhint .wh-bar{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+  /* ---- wide screens: tablet, iPad, desktop browser, phone on its side ----
+     The frame and the top bar go edge to edge; the content keeps a readable width through
+     side padding (so backgrounds and sticky bars still span the screen). */
+  @media (min-width:720px){
+    .app{max-width:none}
+    .app > section{--wide:1040px}
+    #screen-asset{--wide:900px}
+    #screen-settings,#screen-info,#screen-newproject{--wide:760px}
+    .app > section > header,
+    .app > section > main,
+    .app > section > .search{
+      padding-left:max(14px,calc((100% - var(--wide)) / 2));
+      padding-right:max(14px,calc((100% - var(--wide)) / 2))}
+    /* project and asset cards in columns; a group's heading spans the row */
+    #dash-body .group,#panel-body .group{display:grid;
+      grid-template-columns:repeat(auto-fill,minmax(320px,1fr));column-gap:12px;align-items:start}
+    #dash-body .group > .glabel,#panel-body .group > .glabel{grid-column:1 / -1;margin-bottom:10px}
+    #dash-body:has(> .card){display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));
+      column-gap:12px;align-content:start}
+    #dash-body:has(> .card) > :not(.card){grid-column:1 / -1}
+  }
   /* Ratio | Free — a segmented pair, so which one is live is never in doubt */
   .dw-cropmodes{flex:none;display:flex;gap:3px;background:rgba(255,255,255,.13);
     border-radius:999px;padding:3px}
