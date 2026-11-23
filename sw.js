@@ -1,4 +1,4 @@
-const CACHE = 'site-capture-v215';
+const CACHE = 'site-capture-v216';
 const SHELL = [
   './',
   './index.html',

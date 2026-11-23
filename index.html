@@ -3337,6 +3337,18 @@ let panelCountFilter=null;     // {op:'gte'|'eq'|'lte', n} — by how many photo
 let selectMode=false, selectedProjects=new Set();
 function freeUrls(){urlPool.forEach(URL.revokeObjectURL);urlPool=[];}
 function objUrl(blob){const u=URL.createObjectURL(blob);urlPool.push(u);return u;}
+/* A photo that fails to show gets one fresh link from the stored photo - Safari can drop a
+   drawn image and re-fetch it from a link a later render has already released. */
+document.addEventListener('error',e=>{
+  const img=e.target;
+  if(!(img instanceof HTMLImageElement) || img.dataset.retried || !/^blob:/.test(img.src||'')) return;
+  const host=img.closest('[data-view],[data-cap]'); if(!host) return;
+  const capId=host.dataset.view||host.dataset.cap;
+  const pic=(typeof picForCapture==='function')?picForCapture(capId):null;
+  const b=pic?shownBlob(pic):null; if(!b) return;
+  img.dataset.retried='1';
+  try{ img.src=objUrl(b); }catch(_){}
+},true);
 
 const SCREENS=['dashboard','newproject','info','panel','asset','settings'];
 function show(id){SCREENS.forEach(s=>$('#screen-'+s).classList.toggle('hidden',s!==id));}
