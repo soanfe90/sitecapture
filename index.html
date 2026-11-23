@@ -2887,13 +2887,15 @@ let toastTimer;
 function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('show'),2600);}
 
 /* ---------- IndexedDB v2 ---------- */
-const DB_NAME='FieldCaptureDB', DB_VER=2; let db;
+const DB_NAME='FieldCaptureDB', DB_VER=3; let db;
 function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open(DB_NAME,DB_VER);
   r.onupgradeneeded=e=>{const d=e.target.result;
     if(!d.objectStoreNames.contains('kv'))d.createObjectStore('kv',{keyPath:'k'});
     if(!d.objectStoreNames.contains('tmpl'))d.createObjectStore('tmpl',{keyPath:'id'});
     if(!d.objectStoreNames.contains('proj'))d.createObjectStore('proj',{keyPath:'id'});
     if(!d.objectStoreNames.contains('cap')){const cs=d.createObjectStore('cap',{keyPath:'id'});cs.createIndex('byProject','projectId',{unique:false});}
+    // v3: a photo's image bytes, apart from its record (used on Safari/WebKit; see BlobRef)
+    if(!d.objectStoreNames.contains('bytes'))d.createObjectStore('bytes',{keyPath:'k'});
     if(!d.objectStoreNames.contains('pic')){const ps=d.createObjectStore('pic',{keyPath:'id'});ps.createIndex('byProject','projectId',{unique:false});ps.createIndex('byCapture','captureId',{unique:false});}
     // v1 stores ('captures','photos') are left intact for one-time migration on boot.
   };
@@ -2942,6 +2944,7 @@ function idbDec(v,d){
   d=d||0;
   if(v==null||typeof v!=='object'||v instanceof Blob) return v;
   if(v.__idbBytes instanceof ArrayBuffer) return new Blob([v.__idbBytes],{type:v.type||''});
+  if(typeof v.__idbRef==='string') return new BlobRef(v.__idbRef,v.size,v.type);
   if(d>3||v instanceof ArrayBuffer||ArrayBuffer.isView(v)) return v;
   if(Array.isArray(v)){ let out=null;
     for(let i=0;i<v.length;i++){ const e=idbDec(v[i],d+1); if(e!==v[i]){ out=out||v.slice(); out[i]=e; } }
@@ -2955,8 +2958,77 @@ const kvGet=async k=>{const r=await px(store('kv').get(k));return r?idbDec(r.val
 const kvPut=async(k,value)=>{const v=await idbPack(value);return px(store('kv','readwrite').put({k,value:v}));};
 const allOf=n=>px(store(n).getAll()).then(a=>a.map(r=>idbDec(r)));
 const getOf=(n,id)=>px(store(n).get(id)).then(r=>idbDec(r));
-const putOf=async(n,v)=>{const e=await idbPack(v);return px(store(n,'readwrite').put(e));};
-const delOf=(n,id)=>px(store(n,'readwrite').delete(id));
+/* ---- Safari/WebKit: a photo's bytes live in their own store ('bytes') and its record only
+   points at them, so opening a project reads no image data. A BlobRef stands in for the Blob:
+   it knows its size and type and can hand over its bytes; realBlob() makes the real thing. */
+class BlobRef{
+  constructor(k,size,type){ this.k=k; this.size=size||0; this.type=type||''; }
+  arrayBuffer(){ return refBytes(this.k); }
+}
+const refCache=new Map(), REF_CACHE_MAX=40;       // the last photos actually used
+function refCachePut(k,b){ refCache.delete(k); refCache.set(k,b);
+  while(refCache.size>REF_CACHE_MAX) refCache.delete(refCache.keys().next().value); }
+function refCached(k){ const b=refCache.get(k); if(b){ refCache.delete(k); refCache.set(k,b); } return b||null; }
+async function refBytes(k){
+  const c=refCache.get(k); if(c) return c.arrayBuffer();
+  const r=await px(store('bytes').get(k));
+  if(!r||!r.buf) throw new Error('photo bytes missing');
+  return r.buf;
+}
+async function realBlob(b){
+  if(!(b instanceof BlobRef)) return b;
+  const c=refCached(b.k); if(c) return c;
+  let r=null; try{ r=await px(store('bytes').get(b.k)); }catch(_){}
+  if(!r||!r.buf) return null;
+  const blob=new Blob([r.buf],{type:r.type||b.type||'image/jpeg'});
+  refCachePut(b.k,blob);
+  return blob;
+}
+const PIC_FIELDS=['blob','annotated'];
+/* A photo record on its way to the database: each image goes to 'bytes' and the record keeps
+   a pointer. The open project's own object swaps its Blob for a BlobRef too (the Blob stays in
+   the small cache), so memory does not grow with every photo taken. */
+async function packPic(rec){
+  const out=Object.assign({},rec);
+  for(const f of PIC_FIELDS){
+    const v=rec[f], k=rec.id+'|'+f;
+    if(v instanceof Blob){
+      const buf=await readBlobAnyWay(v);
+      if(!buf){ out[f]=v; continue; }                  // unreadable: keep what there is
+      const type=v.type||'image/jpeg';
+      await px(store('bytes','readwrite').put({k,buf,type}));
+      refCachePut(k,v);
+      out[f]={__idbRef:k,size:buf.byteLength,type};
+      rec[f]=new BlobRef(k,buf.byteLength,type);
+    }else if(v instanceof BlobRef){
+      if(v.k!==k){                                      // a duplicate: its own copy of the bytes
+        const buf=await refBytes(v.k);
+        await px(store('bytes','readwrite').put({k,buf,type:v.type}));
+        rec[f]=new BlobRef(k,v.size,v.type);
+      }
+      out[f]={__idbRef:k,size:v.size,type:v.type};
+    }else if(v && v.__idbBytes instanceof ArrayBuffer){  // written by the first Safari fix
+      const type=v.type||'image/jpeg';
+      await px(store('bytes','readwrite').put({k,buf:v.__idbBytes,type}));
+      out[f]={__idbRef:k,size:v.__idbBytes.byteLength,type};
+    }else if(v==null){
+      out[f]=null;
+      try{ await px(store('bytes','readwrite').delete(k)); }catch(_){}
+      refCache.delete(k);
+    }
+  }
+  return out;
+}
+const putOf=async(n,v)=>{
+  const e=(n==='pic' && (IDB_BYTES || (v && PIC_FIELDS.some(f=>v[f] instanceof BlobRef))))
+    ? await packPic(v) : await idbPack(v);
+  return px(store(n,'readwrite').put(e));
+};
+const delOf=(n,id)=>{
+  if(n==='pic'){ try{ const s=store('bytes','readwrite');
+    for(const f of PIC_FIELDS){ s.delete(id+'|'+f); refCache.delete(id+'|'+f); } }catch(_){} }
+  return px(store(n,'readwrite').delete(id));
+};
 function byIndex(storeName,index,key){return new Promise((res,rej)=>{const out=[];
   const c=store(storeName).index(index).openCursor(IDBKeyRange.only(key));
   c.onsuccess=e=>{const cur=e.target.result;if(cur){out.push(idbDec(cur.value));cur.continue();}else res(out);};c.onerror=()=>rej(c.error);});}
@@ -2983,15 +3055,12 @@ async function rescueWebkitPhotos(){
   for(const k of keys){
     let raw; try{ raw=await px(store('pic').get(k)); }catch(_){ continue; }
     if(!raw) continue;
-    let changed=false, bad=false;
-    for(const f of ['blob','annotated']){
-      const b=raw[f];
-      if(!(b instanceof Blob)) continue;
-      const buf=await readBlobAnyWay(b);
-      if(buf){ raw[f]={__idbBytes:buf,type:b.type||'image/jpeg'}; changed=true; }
-      else bad=true;
-    }
-    if(changed){ try{ await px(store('pic','readwrite').put(raw)); saved++; }catch(_){} }
+    // only photos still holding their image in the record: an old Blob, or pz8's inline bytes
+    const todo=PIC_FIELDS.some(f=>raw[f] instanceof Blob || (raw[f] && raw[f].__idbBytes instanceof ArrayBuffer));
+    if(!todo) continue;
+    let out; try{ out=await packPic(raw); }catch(e){ console.warn('rescue',k,e); continue; }
+    const bad=PIC_FIELDS.some(f=>out[f] instanceof Blob);      // packPic keeps what it could not read
+    try{ await px(store('pic','readwrite').put(out)); saved++; }catch(_){}
     if(bad) lost++;
   }
   let prev=null; try{ prev=await kvGet('webkitRescue'); }catch(_){}
@@ -3007,9 +3076,11 @@ const photosForProject=pid=>byIndex('pic','byProject',pid);
 const photosForCapture=cid=>byIndex('pic','byCapture',cid);
 
 /* ---------- image + gps (unchanged from v1) ---------- */
-function loadImg(file){return new Promise((res,rej)=>{const i=new Image();const u=URL.createObjectURL(file);
+function loadImg(file){if(file instanceof BlobRef)return realBlob(file).then(loadImg);
+  return new Promise((res,rej)=>{const i=new Image();const u=URL.createObjectURL(file);
   i.onload=()=>{URL.revokeObjectURL(u);res(i);};i.onerror=()=>{URL.revokeObjectURL(u);rej(new Error('decode'));};i.src=u;});}
 async function compress(file,maxDim=2000,q=0.82){
+  if(file instanceof BlobRef) file=await realBlob(file);
   let src; try{src=await createImageBitmap(file,{imageOrientation:'from-image'});}catch(_){src=await loadImg(file);}
   const w=src.width,h=src.height,scale=Math.min(1,maxDim/Math.max(w,h));
   const cw=Math.max(1,Math.round(w*scale)),ch=Math.max(1,Math.round(h*scale));
@@ -3336,7 +3407,44 @@ let panelTagFilter=null;       // ['t1','none',…] — assets carrying ANY of t
 let panelCountFilter=null;     // {op:'gte'|'eq'|'lte', n} — by how many photos it holds
 let selectMode=false, selectedProjects=new Set();
 function freeUrls(){urlPool.forEach(URL.revokeObjectURL);urlPool=[];}
-function objUrl(blob){const u=URL.createObjectURL(blob);urlPool.push(u);return u;}
+/* A BlobRef (Safari) shows as a 1x1 placeholder first; the watcher below swaps in the photo
+   when the image comes near the screen, so a long list or mosaic loads as it scrolls. */
+const PH_GIF=Uint8Array.from(atob('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'),c=>c.charCodeAt(0));
+const phUrls=new Map();                     // placeholder url -> the BlobRef it stands for
+function objUrl(blob){
+  if(blob instanceof BlobRef){
+    const c=refCached(blob.k);
+    if(c){ const u=URL.createObjectURL(c); urlPool.push(u); return u; }
+    const u=URL.createObjectURL(new Blob([PH_GIF],{type:'image/gif'}));
+    urlPool.push(u);
+    if(phUrls.size>3000) phUrls.clear();
+    phUrls.set(u,blob);
+    return u;
+  }
+  const u=URL.createObjectURL(blob);urlPool.push(u);return u;
+}
+async function fillPlaceholder(img){
+  const src=img.src, ref=phUrls.get(src); if(!ref) return;
+  const b=await realBlob(ref); if(!b) return;
+  if(img.src!==src) return;                 // re-rendered or changed meanwhile
+  phUrls.delete(src);
+  img.src=objUrl(b);
+}
+{
+  const phIO=('IntersectionObserver' in window)
+    ? new IntersectionObserver(es=>{ for(const e of es) if(e.isIntersecting){ phIO.unobserve(e.target); fillPlaceholder(e.target); } },{rootMargin:'800px'})
+    : null;
+  const watch=img=>{ if(!phUrls.has(img.src)) return; if(phIO) phIO.observe(img); else fillPlaceholder(img); };
+  new MutationObserver(ms=>{
+    for(const m of ms){
+      if(m.type==='attributes'){ if(m.target.tagName==='IMG') watch(m.target); continue; }
+      for(const n of m.addedNodes){
+        if(n.nodeType!==1) continue;
+        if(n.tagName==='IMG') watch(n); else if(n.querySelectorAll) n.querySelectorAll('img').forEach(watch);
+      }
+    }
+  }).observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['src']});
+}
 /* A photo that fails to show gets one fresh link from the stored photo - Safari can drop a
    drawn image and re-fetch it from a link a later render has already released. */
 document.addEventListener('error',e=>{
@@ -8793,7 +8901,7 @@ async function lensSearch(capId){
   const cap=caps.find(c=>c.id===capId);
   const pic=cap?picForCapture(capId):null;
   if(!pic){ toast('Photo not ready yet'); return; }
-  const blob=shownBlob(pic);
+  const blob=await realBlob(shownBlob(pic));
   const name=cap.file||'photo.jpg';
   if(isNative() && IMGSEARCH() && IMGSEARCH().searchImage){
     try{
@@ -10118,7 +10226,9 @@ function annotationsOf(cap){ return (cap&&Array.isArray(cap.annotations))?cap.an
 function hasAnnotations(cap){ return annotationsOf(cap).length>0; }
 /* The editor owns its own object URLs: the shared pool is wiped by renderAsset(), which
    would pull the photo out from under an open editor. */
-function drawUrl(blob){ const u=URL.createObjectURL(blob); drawUrls.push(u); return u; }
+function drawUrl(blob){
+  if(blob instanceof BlobRef) blob=refCached(blob.k)||new Blob([PH_GIF],{type:'image/gif'});
+  const u=URL.createObjectURL(blob); drawUrls.push(u); return u; }
 function freeDrawUrls(){ drawUrls.forEach(u=>{ try{ URL.revokeObjectURL(u); }catch(_){} }); drawUrls=[]; drawOrigUrl=''; }
 /* ---- undo: one stack for every kind of edit, crops included ----
    A step is the whole editable state, which is small: a few hundred bytes of shapes, a
@@ -10156,6 +10266,9 @@ async function openDraw(cap){
   cap=cap||colPendingCap; if(!cap) return;
   const pic=picForCapture(cap.id);
   if(!pic){ toast('Photo not ready yet'); return; }
+  // Safari keeps only a pointer to the photo until it is needed: the editor needs it now
+  if(pic.blob instanceof BlobRef){ const b=await realBlob(pic.blob); if(b) pic.blob=b; }
+  if(pic.annotated instanceof BlobRef){ const b=await realBlob(pic.annotated); if(b) pic.annotated=b; }
   drawCap=cap;
   drawShapes=annotationsOf(cap).map(s=>JSON.parse(JSON.stringify(s)));   // edit a copy
   drawTool='free'; drawing=null; cropRect=null; drawCrop=null; drawUndo=[]; dwResetZoom();
@@ -10266,6 +10379,7 @@ function composeCanvas(src,rot,crop,max){
    geometry was set against that view, so the bitmap has to be turned the same way or the cut
    lands in the wrong place AND comes out the wrong shape. */
 async function transformBlob(blob,rot,crop){
+  if(blob instanceof BlobRef) blob=await realBlob(blob);
   let src; try{ src=await createImageBitmap(blob,{imageOrientation:'from-image'}); }
   catch(_){ src=await loadImg(blob); }
   const cv=composeCanvas(src,rot||0,crop,0);
@@ -10620,6 +10734,7 @@ function eraseAt(pt){
 }
 /* Flatten photo + shapes into a JPEG — what the export and the disk copy should show. */
 async function renderAnnotated(blob,shapes){
+  if(blob instanceof BlobRef) blob=await realBlob(blob);
   // 'from-image' so the flattened copy matches the <img> the shapes were drawn over
   let src; try{ src=await createImageBitmap(blob,{imageOrientation:'from-image'}); }
   catch(_){ src=await loadImg(blob); }
@@ -11037,6 +11152,7 @@ function trayWhere(c){
    would empty an open tray from underneath itself. */
 const trayThumbs=new Map();          // capId -> object URL of a ~256px copy
 async function makeThumb(blob,max){
+  if(blob instanceof BlobRef) blob=await realBlob(blob);
   let src; try{ src=await createImageBitmap(blob,{imageOrientation:'from-image'}); }
   catch(_){ src=await loadImg(blob); }
   const w=src.width||src.naturalWidth, h=src.height||src.naturalHeight;
@@ -11615,6 +11731,7 @@ function latin1(str){
 
 /* ---- turning a stored photo into JPEG bytes at a sane size for print ---- */
 async function pdfJpeg(blob,maxDim,quality){
+  if(blob instanceof BlobRef) blob=await realBlob(blob);
   const small=await compress(blob,maxDim,quality==null?0.82:quality);
   const buf=await small.arrayBuffer();
   const bytes=new Uint8Array(buf);
@@ -14258,7 +14375,8 @@ function wire(){
     if(confirm('Reset this device? This deletes ALL projects, templates, photos and data stored on this phone, '+
                'including the photo folders in '+destLabel()+'.')){
       for(const p of await allOf('proj')) await deleteDestFolder(projectDir(p));
-      for(const s of ['kv','tmpl','proj','cap','pic'])await px(store(s,'readwrite').clear());
+      for(const s of ['kv','tmpl','proj','cap','pic','bytes'])
+        if(db.objectStoreNames.contains(s)) await px(store(s,'readwrite').clear());
       toast('Device cleared'); openDashboard();
     }
   };

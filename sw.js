@@ -1,4 +1,4 @@
-const CACHE = 'site-capture-v216';
+const CACHE = 'site-capture-v218';
 const SHELL = [
   './',
   './index.html',
@@ -36,9 +36,13 @@ self.addEventListener('activate', e => {
    page has not arrived in 4 seconds, so a basement never means a blank screen. */
 function openPage(req) {
   // the freshest saved page is always ./index.html (every online open refreshes it)
-  const saved = () => caches.match('./index.html').then(hit => hit || caches.match(req));
+  const saved = () => isApp
+    ? caches.match('./index.html').then(hit => hit || caches.match(req))
+    : caches.match(req).then(hit => hit || caches.match('./index.html'));
+  // only the app itself is saved as the offline page - never the privacy policy or any other page
+  const isApp = /\/(index\.html)?$/.test(new URL(req.url).pathname);
   const net = fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' }).then(resp => {
-    if (resp && resp.ok) {
+    if (resp && resp.ok && isApp) {
       const copy = resp.clone();
       caches.open(CACHE).then(c => c.put('./index.html', copy));
     }
