@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Auditor · Site Capture</title>
 <meta name="theme-color" content="#1E3A8A">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -47,6 +47,9 @@
      random across the app. This is the one rule that makes the UI typographically single. */
   button,input,select,textarea{font-family:inherit}
   html,body{margin:0;height:100%}
+  /* the page itself never zooms (pinch, double tap, rotation); photo views zoom on their own */
+  html{-webkit-text-size-adjust:100%;text-size-adjust:100%;touch-action:pan-x pan-y}
+  body{touch-action:pan-x pan-y}
   body{background:var(--bg);color:var(--text);font-family:var(--sans);
     font-size:16px;line-height:1.45;-webkit-font-smoothing:antialiased;
     overscroll-behavior-y:none}
@@ -3048,6 +3051,10 @@ function isNative(){ return !!(window.Capacitor && Capacitor.isNativePlatform &&
                                 && Capacitor.Plugins && Capacitor.Plugins.Filesystem); }
 // The web version is this same page in a browser: CSS hides .native-only and shows .web-only.
 document.documentElement.classList.toggle('web',!isNative());
+// Safari (iPhone/iPad) ignores user-scalable=no, so cancel its pinch gesture outright. The app's
+// own pinch-to-zoom on photos runs on touch/pointer events and is not affected.
+for(const ev of ['gesturestart','gesturechange','gestureend'])
+  document.addEventListener(ev,e=>e.preventDefault(),{passive:false});
 /* ---------- where files go on the device ----------
    The destination is chosen ONCE in Settings, never during an export:
      'folder'    -> a folder the user picked (SAF tree URI kept in settings.folderUri)
