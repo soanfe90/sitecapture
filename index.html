@@ -4240,7 +4240,7 @@ const PLAY_PACKAGE='com.auditor.sitecapture';
 const WEB_KEY_URL='https://buy.polar.sh/polar_cl_Sl9wI0p3I4CQdBHfrKgtfkNXvUAzQWOetJlum3UaJC2';      // the store listing, for the web fallback
 /* The public copy of the policy. Play's listing must point at this same URL, and the app
    shows the bundled copy, so the two are the same document in two places. */
-const PRIVACY_URL='https://soanfe90.github.io/sitecapture-privacy/privacy-policy.html';
+const PRIVACY_URL='https://sitecapture.theauditorapp.com/privacy-policy.html';
 function BILLING(){ return (window.Capacitor&&Capacitor.Plugins)?Capacitor.Plugins.Billing:null; }
 function canSubscribe(){ return !!(isNative()&&BILLING()); }
 /* Entitlement is whatever Play says right now — never what a purchase flow returned. That is
